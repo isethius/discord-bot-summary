@@ -12,11 +12,14 @@ import os
 import tiktoken
 from dotenv import load_dotenv
 import discord
+from discord.ext import commands, tasks
 import asyncio
 import re
 
 # Load environment variables
 load_dotenv()
+
+# console.log: fast_summarizer.py - Environment variables loaded
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Discord Fast Channel Summarizer')
@@ -41,12 +44,14 @@ OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 # Validate required config (common for both bot and fallback)
 if not CHANNEL_IDS or OUTPUT_CHANNEL_ID == 0:
-    print(f"Error: Missing or invalid environment variables for config '{args.config}':")
+    print(f"console.log: fast_summarizer.py - Error: Missing or invalid environment variables for config '{args.config}':")
     if not CHANNEL_IDS:
-        print(f"- {config_type}_CHANNEL_IDS")
+        print(f"console.log: fast_summarizer.py - Missing: {config_type}_CHANNEL_IDS")
     if OUTPUT_CHANNEL_ID == 0:
-        print(f"- {config_type}_OUTPUT_CHANNEL_ID")
+        print(f"console.log: fast_summarizer.py - Missing: {config_type}_OUTPUT_CHANNEL_ID")
     exit(1) # Exit if config is missing
+
+print(f"console.log: fast_summarizer.py - Configuration loaded successfully: {len(CHANNEL_IDS)} channel(s), output to {OUTPUT_CHANNEL_ID}")
 
 # Validate API keys needed for summarization (if not in debug mode)
 if not args.debug and not OPENROUTER_API_KEY:
@@ -65,9 +70,10 @@ elif not TOKEN:
 # Functions requiring headers will create them locally.
 # Set up Discord bot client
 intents = discord.Intents.default()
+intents.message_content = True
 # Required for message content access if your bot needs it, but we fetch via HTTP API
 # intents.message_content = True # Uncomment if direct bot message reading is ever added
-bot_client = discord.Client(intents=intents)
+bot_client = commands.Bot(command_prefix="!", intents=intents)
 
 # --- Helper Functions ---
 
@@ -235,15 +241,19 @@ async def fetch_and_process_channel_data(channel_ids_to_fetch, hours_to_fetch, u
 async def send_bot_message(channel_id, content):
     """Send a message using the bot client"""
     try:
+        print(f"console.log: fast_summarizer.py - Attempting to send message to channel {channel_id} via bot")
         channel = bot_client.get_channel(channel_id)
         if not channel:
+            print(f"console.log: fast_summarizer.py - Channel not cached, fetching channel {channel_id}")
             channel = await bot_client.fetch_channel(channel_id) # Fetch if not cached
 
         if not channel:
-             print(f"Error: Bot could not find channel {channel_id}")
+             print(f"console.log: fast_summarizer.py - Error: Bot could not find channel {channel_id}")
              return False
 
+        print(f"console.log: fast_summarizer.py - Sending message to channel {channel.name} ({channel_id})")
         await channel.send(content)
+        print(f"console.log: fast_summarizer.py - Message sent successfully via bot")
         return True
     except discord.Forbidden:
         print(f"Error sending message via bot: Bot lacks permissions for channel {channel_id}.")
@@ -279,10 +289,12 @@ def send_user_message(channel_id, content):
         print(f"Exception sending message via user token: {e}")
         return False
 #async def generate_summary(text, config_type_local, model_name="deepseek/deepseek-r1-0528:free"):
-async def generate_summary(text, config_type_local, model_name="google/gemini-2.5-flash-preview"):
+async def generate_summary(text, config_type_local, model_name="google/gemini-2.5-pro"):
     """Generate a summary using OpenRouter API asynchronously"""
-    print(f"Generating summary using {model_name} for config '{config_type_local.lower()}'...")
+    print(f"console.log: fast_summarizer.py - Generating summary using {model_name} for config '{config_type_local.lower()}'...")
+    print(f"console.log: fast_summarizer.py - Text length to summarize: {len(text)} characters")
     prompt = load_prompt(config_type_local)
+    print(f"console.log: fast_summarizer.py - Prompt loaded, making API request to OpenRouter...")
 
     request_payload = {
         "model": model_name,
@@ -312,14 +324,18 @@ async def generate_summary(text, config_type_local, model_name="google/gemini-2.
             timeout=180 # Add a timeout (e.g., 3 minutes)
         )
         if response.status_code == 200:
-            content = response.json()["choices"][0]["message"]["content"]
+            print(f"console.log: fast_summarizer.py - OpenRouter API call successful")
+            response_data = response.json()
+            print(f"console.log: fast_summarizer.py - Response data keys: {list(response_data.keys())}")
+            content = response_data["choices"][0]["message"]["content"]
+            print(f"console.log: fast_summarizer.py - Summary generated, length: {len(content)} characters")
             # 1. Wrap URLs in markdown links: [Title](URL) -> [Title](<URL>)
             modified_content = re.sub(r'\[([^\]]+)\]\(([^)\s]+)\)', r'[\1](<\2>)', content)
             # 2. Wrap plain URLs: http://... -> <http://...> (avoiding those already wrapped or in markdown links)
             modified_content = re.sub(r'(?<![<(])(https?://[^\s<>]+)(?![)>])', r'<\1>', modified_content)
             return modified_content
         else:
-            print(f"OpenRouter API error: {response.status_code}, {response.text}")
+            print(f"console.log: fast_summarizer.py - OpenRouter API error: {response.status_code}, {response.text}")
             return f"Error generating summary: API returned status code {response.status_code}"
     except requests.Timeout:
         print("Error in OpenRouter API call: Request timed out.")
@@ -439,61 +455,136 @@ async def process_channels_and_summarize(config_type_local):
     print("--- Channel Processing Complete ---")
     return full_message, ending_art_code_block
 
+# --- Bot Commands ---
+
+V3_MODEL_SLUG = "deepseek/deepseek-chat-v3-0324"
+V3_OUTPUT_CHANNEL_ID = int(os.getenv("V3_OUTPUT_CHANNEL_ID", "0"))
+
+@tasks.loop(hours=24)
+async def daily_v3_summary():
+    """Post a DeepSeek-V3 summary every 24 h to its dedicated channel"""
+    if V3_OUTPUT_CHANNEL_ID == 0:
+        print("console.log: fast_summarizer.py - V3_OUTPUT_CHANNEL_ID not set; skipping daily summary loop")
+        return
+    hours = 24
+    try:
+        msgs, names, total = await fetch_and_process_channel_data(CHANNEL_IDS, hours, TOKEN)
+        if not msgs:
+            print("console.log: fast_summarizer.py - No messages for daily V3 summary")
+            return
+        text = "".join(f"[{m['channel']}] {m['author']}: {m['content']}\n" for m in msgs if m.get('content'))
+        summary = await generate_summary(text, config_type, model_name=V3_MODEL_SLUG)
+        header = f"**Daily DeepSeek V3 Summary ({total} msgs / 24 h)**\n"
+        for part in split_message(header + summary.strip()):
+            await send_bot_message(V3_OUTPUT_CHANNEL_ID, part)
+            await asyncio.sleep(1)
+        print("console.log: fast_summarizer.py - Daily V3 summary posted successfully")
+    except Exception as e:
+        print(f"console.log: fast_summarizer.py - Error in daily V3 summary: {e}")
+
+# Mapping for dynamic model selection
+MODEL_MAP = {
+    "pro": "google/gemini-2.5-pro",           # premium
+    "v3":  "deepseek/deepseek-chat-v3-0324",  # budget
+    "free": "deepseek/deepseek-r1-distill-llama-70b:free"  # zero-cost
+}
+
+@bot_client.command(name="summarize", aliases=["sum", "summary"])
+async def summarize_command(ctx, hours: int = 12):
+    """Summarize the last X hours of messages. Usage: !summarize 6 or !sum 12"""
+    print(f"console.log: fast_summarizer.py - Command received: summarize {hours} hours from {ctx.author}")
+    
+    # Validate hours
+    if hours < 1 or hours > 72:
+        await ctx.send("❌ Hours must be between 1 and 72!")
+        return
+    
+    # Send initial response
+    await ctx.send(f"🔄 Generating summary for the last {hours} hours...")
+    
+    try:
+        # Use the existing summarization logic
+        all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
+            CHANNEL_IDS, hours, TOKEN
+        )
+        
+        if not all_messages_data:
+            await ctx.send("❌ No messages found in the specified time period.")
+            return
+        
+        # Generate conversation text
+        conversation_text = ""
+        for msg in all_messages_data:
+            if msg.get("content"):
+                conversation_text += f"[{msg["channel"]}] {msg["author"]}: {msg["content"]}\n"
+        
+        if not conversation_text.strip():
+            await ctx.send("❌ No message content found to summarize.")
+            return
+        
+        # Generate summary
+        summary = await generate_summary(conversation_text, config_type)
+        formatted_summary = summary.strip()
+        
+        # Create header
+        channel_list = ", ".join(channel_names.values())
+        header = f"**Requested Summary ({config_type.lower().capitalize()}) of {len(channel_names)} Channels ({total_messages_found} msgs, {hours}h):**\n{channel_list}\n\n"
+        
+        full_message = header + formatted_summary
+        
+        # Send summary in parts
+        message_parts = split_message(full_message)
+        for part in message_parts:
+            await ctx.send(part)
+            await asyncio.sleep(1)
+        
+        print(f"console.log: fast_summarizer.py - Command completed successfully for {ctx.author}")
+        
+    except Exception as e:
+        error_msg = f"❌ Error generating summary: {str(e)}"
+        await ctx.send(error_msg)
+        print(f"console.log: fast_summarizer.py - Command error: {e}")
+
+@bot_client.command(name="help_summary")
+async def help_summary(ctx):
+    """Show help for summary commands"""
+    help_text = """
+**📋 Summary Commands:**
+
+`!summarize [hours]` - Generate summary for last X hours (default: 12)
+`!sum [hours]` - Short version of summarize
+`!summary [hours]` - Alternative version
+
+**Examples:**
+• `!summarize` - Last 12 hours
+• `!sum 6` - Last 6 hours
+• `!summary 24` - Last 24 hours
+
+**Notes:**
+• Hours range: 1-72
+• Uses current configuration (ordinals)
+• Powered by Gemini 2.5 Pro 🤖
+"""
+    await ctx.send(help_text)
 # --- Bot Event Handler ---
 
 @bot_client.event
 async def on_ready():
     """Event handler when the bot is ready"""
-    print(f'Bot logged in as {bot_client.user} (ID: {bot_client.user.id})')
+    print(f'console.log: fast_summarizer.py - Bot logged in as {bot_client.user} (ID: {bot_client.user.id})')
+    print('console.log: fast_summarizer.py - Starting summarization process')
     print('------')
 
     summary_message = ending_art = None
     try:
-        summary_message, ending_art = await process_channels_and_summarize(config_type)
+        # summary_message, ending_art = await process_channels_and_summarize(config_type)  # Disabled auto-summary on startup
+        print("console.log: fast_summarizer.py - Bot ready and listening for commands!")
+        print("console.log: fast_summarizer.py - Use !summarize [hours] to generate summaries")
+        if not daily_v3_summary.is_running():
+            daily_v3_summary.start()        # Bot stays connected for commands - no auto-close
+
     except Exception as e:
-        print(f"Error during channel processing and summarization: {e}")
-        # Optionally try to send an error message via bot
-        try:
-            await send_bot_message(OUTPUT_CHANNEL_ID, f"An error occurred during summarization: {e}")
-        except Exception as send_e:
-             print(f"Failed to send error message via bot: {send_e}")
-
-    if summary_message:
-        print(f"Sending summary to Discord channel {OUTPUT_CHANNEL_ID} using bot...")
-        # Send main message parts first
-        message_parts = split_message(summary_message)
-        success_count = 0
-        for i, part in enumerate(message_parts):
-            success = await send_bot_message(OUTPUT_CHANNEL_ID, part)
-            if success:
-                success_count += 1
-            await asyncio.sleep(1) # Delay between parts
-
-        # Send ASCII art in separate message if it exists
-        if ending_art:
-            await send_bot_message(OUTPUT_CHANNEL_ID, ending_art)
-            if success:
-                success_count += 1
-            else:
-                print(f"Failed to send part {i+1} of the summary via bot.")
-                # No automatic fallback here anymore, main() handles initial failure
-            await asyncio.sleep(1) # Delay between parts
-
-        if success_count == len(message_parts):
-             print("Summary sent successfully via bot.")
-        else:
-             print(f"Failed to send {len(message_parts) - success_count} parts of the summary via bot.")
-
-    else:
-        print("No summary was generated or an error occurred.")
-
-    # Close the bot connection gracefully
-    print("Processing complete. Closing bot connection...")
-    await bot_client.close()
-    print("Bot connection closed.")
-
-
-# --- Fallback Logic ---
+        print(f"Error during bot startup: {e}")# --- Fallback Logic ---
 
 def run_fallback_synchronously(config_type_fallback):
     """
@@ -626,13 +717,14 @@ def run_debug_mode():
 
 def main():
     """Main function to route execution based on args."""
+    print(f"console.log: fast_summarizer.py - Starting main() with config: {args.config}, debug: {args.debug}")
     if args.debug:
         run_debug_mode()
     else:
         # --- Try running with Bot Token ---
-        print(f"Attempting to start bot with config: {args.config}")
+        print(f"console.log: fast_summarizer.py - Attempting to start bot with config: {args.config}")
         if not BOT_TOKEN:
-            print("Error: BOT_TOKEN not set. Attempting fallback to user token method...")
+            print("console.log: fast_summarizer.py - Error: BOT_TOKEN not set. Attempting fallback to user token method...")
             run_fallback_synchronously(config_type)
             return # Exit after fallback attempt
 

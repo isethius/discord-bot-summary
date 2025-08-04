@@ -21,4 +21,8 @@ ENV/
 Thumbs.db
 
 # Old Versions
-archived/
+archived/.env
+*.pyc
+__pycache__/
+.venv/
+*.log
