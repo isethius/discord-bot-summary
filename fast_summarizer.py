@@ -38,8 +38,12 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')  # Discord bot token (primary method)
 # Load channel IDs based on config
 channel_ids_str = os.getenv(f'{config_type}_CHANNEL_IDS', '')
 CHANNEL_IDS = [int(id) for id in channel_ids_str.split(',') if id]
-# Load output channel ID based on config
-OUTPUT_CHANNEL_ID = int(os.getenv(f'{config_type}_OUTPUT_CHANNEL_ID', '0'))
+
+# Load output channel ID based on config, handle missing/empty gracefully
+output_channel_id_str = os.getenv(f'{config_type}_OUTPUT_CHANNEL_ID', '') or '0'
+# Convert to int only if the string represents a valid integer
+OUTPUT_CHANNEL_ID = int(output_channel_id_str) if output_channel_id_str.isdigit() else 0
+# console.log(fast_summarizer.py: Loaded OUTPUT_CHANNEL_ID={OUTPUT_CHANNEL_ID})
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 # Validate required config (common for both bot and fallback)
