@@ -158,4 +158,4 @@ Edit them freely; the summariser reads the correct file based on `--config`.
 
 ---
 
-Happy summarising! 🎉
+Happy summarising! 🎉# discord-bot-summary
