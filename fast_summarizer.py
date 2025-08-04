@@ -26,7 +26,7 @@ parser = argparse.ArgumentParser(description='Discord Fast Channel Summarizer')
 parser.add_argument('--hours', type=int, default=12, help='Number of hours of chat history to fetch (default: 12)')
 parser.add_argument('--limit', type=int, default=50, help='Maximum number of messages per channel (default: 50, currently informational)') # Note: Limit arg isn't strictly enforced in fetch logic anymore
 parser.add_argument('--debug', action='store_true', help='Print messages to console instead of summarizing')
-parser.add_argument('--config', type=str, default='defi', choices=['defi', 'ordinals'], help='Configuration type to use (defi or ordinals)')
+parser.add_argument('--config', type=str, default='ordinals', choices=['defi', 'ordinals'], help='Configuration type to use (defi or ordinals, default ordinals)')
 args = parser.parse_args()
 
 # Determine config type
