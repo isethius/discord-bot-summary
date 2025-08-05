@@ -494,17 +494,32 @@ MODEL_MAP = {
 }
 
 @bot_client.command(name="summarize", aliases=["sum", "summary"])
-async def summarize_command(ctx, hours: int = 12):
+async def summarize_command(ctx, tier_or_hours: str = "pro", hours: int = 12):
     """Summarize the last X hours of messages. Usage: !summarize 6 or !sum 12"""
-    print(f"console.log: fast_summarizer.py - Command received: summarize {hours} hours from {ctx.author}")
+    print(f"console.log: fast_summarizer.py - Command received: summarize {tier_or_hours} {hours} from {ctx.author}")
     
+    # Determine model tier and hours
+    selected_model_key = "pro"
+    if tier_or_hours.isdigit():
+        hours = int(tier_or_hours)
+    else:
+        selected_model_key = tier_or_hours.lower()
+
     # Validate hours
     if hours < 1 or hours > 72:
         await ctx.send("❌ Hours must be between 1 and 72!")
         return
     
     # Send initial response
-    await ctx.send(f"🔄 Generating summary for the last {hours} hours...")
+        # Validate model choice
+    if selected_model_key not in MODEL_MAP:
+        valid_keys = ", ".join(MODEL_MAP.keys())
+        await ctx.send(f"❌ Unknown model tier '{selected_model_key}'. Valid options: {valid_keys}")
+        return
+
+    model_slug = MODEL_MAP[selected_model_key]
+    # Send initial response
+    await ctx.send(f"🔄 Generating summary for the last {hours} hours using **{selected_model_key}** model…")
     
     try:
         # Use the existing summarization logic
@@ -527,12 +542,15 @@ async def summarize_command(ctx, hours: int = 12):
             return
         
         # Generate summary
-        summary = await generate_summary(conversation_text, config_type)
+        summary = await generate_summary(conversation_text, config_type, model_name=model_slug)
         formatted_summary = summary.strip()
         
         # Create header
         channel_list = ", ".join(channel_names.values())
-        header = f"**Requested Summary ({config_type.lower().capitalize()}) of {len(channel_names)} Channels ({total_messages_found} msgs, {hours}h):**\n{channel_list}\n\n"
+        header = (
+            f"**Requested Summary ({config_type.lower().capitalize()}) of {len(channel_names)} Channels "
+            f"({total_messages_found} msgs, {hours}h, model: {selected_model_key}):**\n{channel_list}\n\n"
+        )
         
         full_message = header + formatted_summary
         
