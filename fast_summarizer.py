@@ -15,6 +15,10 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import re
+import pytz
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from collections import defaultdict
+import math
 
 # Load environment variables
 load_dotenv()
@@ -405,6 +409,143 @@ def split_message(message, max_length=2000):
         return final_parts
 
 
+def analyze_sentiment(text):
+    """
+    Analyze sentiment of text using VADER
+    Returns: dict with compound score and category
+    """
+    # console.log: fast_summarizer.py - Analyzing sentiment for message
+    analyzer = SentimentIntensityAnalyzer()
+    scores = analyzer.polarity_scores(text)
+    compound = scores['compound']
+    
+    if compound >= 0.05:
+        category = "positive"
+        emoji = "😊"
+    elif compound <= -0.05:
+        category = "negative" 
+        emoji = "😔"
+    else:
+        category = "neutral"
+        emoji = "😐"
+    
+    return {
+        'compound': compound,
+        'category': category,
+        'emoji': emoji,
+        'scores': scores
+    }
+
+async def search_word_with_sentiment(term, hours, channel_ids, user_token):
+    """
+    Search for a term in Discord messages with sentiment analysis
+    """
+    print(f"console.log: fast_summarizer.py - Starting word search for '{term}' in last {hours} hours")
+    
+    # Fetch messages using existing function
+    all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
+        channel_ids, hours, user_token
+    )
+    
+    if not all_messages_data:
+        print(f"console.log: fast_summarizer.py - No messages found for word search")
+        return None
+    
+    # Search for term (case-insensitive)
+    term_lower = term.lower()
+    matching_messages = []
+    sentiment_stats = {'positive': 0, 'negative': 0, 'neutral': 0}
+    user_mentions = set()
+    channel_breakdown = defaultdict(int)
+    sentiment_examples = {'most_positive': None, 'most_negative': None}
+    max_positive = -2
+    max_negative = 2
+    
+    print(f"console.log: fast_summarizer.py - Analyzing {len(all_messages_data)} messages for term '{term}'")
+    
+    for msg in all_messages_data:
+        content = msg.get('content', '')
+        if term_lower in content.lower():
+            # Analyze sentiment
+            sentiment_result = analyze_sentiment(content)
+            
+            # Track statistics
+            sentiment_stats[sentiment_result['category']] += 1
+            user_mentions.add(msg.get('author', 'Unknown'))
+            channel_breakdown[msg.get('channel', 'Unknown')] += 1
+            
+            # Track best examples
+            compound = sentiment_result['compound']
+            if compound > max_positive:
+                max_positive = compound
+                sentiment_examples['most_positive'] = {
+                    'content': content[:100] + '...' if len(content) > 100 else content,
+                    'score': compound,
+                    'author': msg.get('author', 'Unknown'),
+                    'channel': msg.get('channel', 'Unknown'),
+                    'timestamp': msg.get('timestamp', '')
+                }
+            
+            if compound < max_negative:
+                max_negative = compound
+                sentiment_examples['most_negative'] = {
+                    'content': content[:100] + '...' if len(content) > 100 else content,
+                    'score': compound,
+                    'author': msg.get('author', 'Unknown'),
+                    'channel': msg.get('channel', 'Unknown'),
+                    'timestamp': msg.get('timestamp', '')
+                }
+            
+            matching_messages.append({
+                'message': msg,
+                'sentiment': sentiment_result
+            })
+    
+    if not matching_messages:
+        print(f"console.log: fast_summarizer.py - No mentions of '{term}' found")
+        return {
+            'term': term,
+            'total_mentions': 0,
+            'sentiment_stats': sentiment_stats,
+            'unique_users': 0,
+            'channel_breakdown': dict(channel_breakdown),
+            'examples': sentiment_examples,
+            'overall_sentiment': 'neutral'
+        }
+    
+    # Calculate overall sentiment
+    total_mentions = len(matching_messages)
+    positive_pct = round((sentiment_stats['positive'] / total_mentions) * 100)
+    negative_pct = round((sentiment_stats['negative'] / total_mentions) * 100)
+    neutral_pct = round((sentiment_stats['neutral'] / total_mentions) * 100)
+    
+    # Determine overall sentiment trend
+    if positive_pct > 50:
+        overall_sentiment = f"Mostly Positive ({positive_pct}%)"
+    elif negative_pct > 50:
+        overall_sentiment = f"Mostly Negative ({negative_pct}%)"
+    elif positive_pct > negative_pct:
+        overall_sentiment = f"Positive-leaning ({positive_pct}% pos, {negative_pct}% neg)"
+    elif negative_pct > positive_pct:
+        overall_sentiment = f"Negative-leaning ({negative_pct}% neg, {positive_pct}% pos)"
+    else:
+        overall_sentiment = f"Neutral ({neutral_pct}% neutral)"
+    
+    print(f"console.log: fast_summarizer.py - Word search analysis complete: {total_mentions} mentions found")
+    
+    return {
+        'term': term,
+        'total_mentions': total_mentions,
+        'sentiment_stats': sentiment_stats,
+        'sentiment_percentages': {'positive': positive_pct, 'negative': negative_pct, 'neutral': neutral_pct},
+        'unique_users': len(user_mentions),
+        'channel_breakdown': dict(channel_breakdown),
+        'examples': sentiment_examples,
+        'overall_sentiment': overall_sentiment,
+        'messages': matching_messages
+    }
+
+
 async def process_channels_and_summarize(config_type_local):
     """
     Uses the unified fetch function, generates a summary, and prepares the message content.
@@ -464,12 +605,18 @@ async def process_channels_and_summarize(config_type_local):
 V3_MODEL_SLUG = "deepseek/deepseek-chat-v3-0324"
 V3_OUTPUT_CHANNEL_ID = int(os.getenv("V3_OUTPUT_CHANNEL_ID", "0"))
 
-@tasks.loop(hours=24)
+@tasks.loop(time=datetime.time(hour=14, minute=30))  # 7:30 AM Arizona time (UTC-7, so 14:30 UTC)
 async def daily_v3_summary():
-    """Post a DeepSeek-V3 summary every 24 h to its dedicated channel"""
+    """Post a DeepSeek-V3 summary every day at 7:30 AM Arizona time to its dedicated channel"""
     if V3_OUTPUT_CHANNEL_ID == 0:
         print("console.log: fast_summarizer.py - V3_OUTPUT_CHANNEL_ID not set; skipping daily summary loop")
         return
+    
+    # Verify we're running at the correct Arizona time
+    arizona_tz = pytz.timezone('US/Arizona')
+    arizona_time = datetime.datetime.now(arizona_tz)
+    print(f"console.log: fast_summarizer.py - Running daily V3 summary at Arizona time: {arizona_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
     hours = 24
     try:
         msgs, names, total = await fetch_and_process_channel_data(CHANNEL_IDS, hours, TOKEN)
@@ -478,7 +625,7 @@ async def daily_v3_summary():
             return
         text = "".join(f"[{m['channel']}] {m['author']}: {m['content']}\n" for m in msgs if m.get('content'))
         summary = await generate_summary(text, config_type, model_name=V3_MODEL_SLUG)
-        header = f"**Daily DeepSeek V3 Summary ({total} msgs / 24 h)**\n"
+        header = f"**Daily DeepSeek V3 Summary ({total} msgs / 24 h) - {arizona_time.strftime('%B %d, %Y')}**\n"
         for part in split_message(header + summary.strip()):
             await send_bot_message(V3_OUTPUT_CHANNEL_ID, part)
             await asyncio.sleep(1)
@@ -588,6 +735,139 @@ async def help_summary(ctx):
 • Powered by Gemini 2.5 Pro 🤖
 """
     await ctx.send(help_text)
+
+@bot_client.command(name="helpbot")
+async def help_command(ctx):
+    """Show help for all bot commands"""
+    help_text = """
+**🤖 Discord Bot Commands:**
+
+**📋 Summary Commands:**
+`!summarize [model] [hours]` - Generate summary (default: pro, 12h)
+`!sum [hours]` - Quick summary
+`!summary [hours]` - Alternative
+
+**🔍 Search Commands:**
+`!wordsearch "term" [hours] [details]` - Word search with sentiment
+`!ws "term"` - Quick word search  
+`!search "term"` - Alternative search
+
+**ℹ️ Help Commands:**
+`!helpbot` - Show this help
+`!help_summary` - Detailed summary help
+`!help_search` - Detailed search help
+
+**Examples:**
+• `!summarize` - Last 12 hours summary
+• `!wordsearch "ethereum" 24` - Search "ethereum" in 24h
+• `!ws "DeFi" 6 yes` - Search with examples
+
+**Models:** pro (Gemini 2.5), v3 (DeepSeek), free (budget)
+"""
+    await ctx.send(help_text)
+
+@bot_client.command(name="wordsearch", aliases=["ws", "search"])
+async def word_search_command(ctx, term: str, hours: int = 7, show_details: str = "no"):
+    """Search for a word/phrase with sentiment analysis. Usage: !wordsearch "term" [hours] [details]"""
+    print(f"console.log: fast_summarizer.py - Word search command: '{term}' {hours}h from {ctx.author}")
+    
+    # Validate inputs
+    if hours < 1 or hours > 168:  # Max 1 week
+        await ctx.send("❌ Hours must be between 1 and 168 (1 week)!")
+        return
+    
+    if len(term) < 2:
+        await ctx.send("❌ Search term must be at least 2 characters!")
+        return
+    
+    # Send initial response
+    await ctx.send(f"🔍 Searching for **'{term}'** in the last {hours} hours with sentiment analysis...")
+    
+    try:
+        # Perform search
+        results = await search_word_with_sentiment(term, hours, CHANNEL_IDS, TOKEN)
+        
+        if not results or results['total_mentions'] == 0:
+            await ctx.send(f"❌ No mentions of **'{term}'** found in the last {hours} hours.")
+            return
+        
+        # Format results
+        stats = results['sentiment_stats']
+        total = results['total_mentions']
+        unique_users = results['unique_users']
+        overall = results['overall_sentiment']
+        
+        # Create main response
+        response = f"""📊 **Search Results for "{term}" (Last {hours} hours)**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 **Total Mentions:** {total}
+😊 **Positive:** {stats['positive']} ({results['sentiment_percentages']['positive']}%)
+😔 **Negative:** {stats['negative']} ({results['sentiment_percentages']['negative']}%)
+😐 **Neutral:** {stats['neutral']} ({results['sentiment_percentages']['neutral']}%)
+
+👥 **Unique Users:** {unique_users}
+📈 **Overall Sentiment:** {overall}
+
+📊 **Channel Breakdown:**"""
+        
+        # Add channel breakdown
+        for channel, count in results['channel_breakdown'].items():
+            response += f"\n• **{channel}:** {count} mentions"
+        
+        await ctx.send(response)
+        
+        # Show examples if requested or if there are notable sentiment examples
+        if show_details.lower() in ['yes', 'y', 'true', '1'] or total <= 10:
+            examples_msg = ""
+            
+            if results['examples']['most_positive'] and stats['positive'] > 0:
+                ex = results['examples']['most_positive']
+                examples_msg += f"\n💬 **Most Positive Mention** (Score: {ex['score']:.2f}):\n"
+                examples_msg += f"*{ex['author']} in #{ex['channel']}:*\n\"{ex['content']}\"\n"
+            
+            if results['examples']['most_negative'] and stats['negative'] > 0:
+                ex = results['examples']['most_negative']
+                examples_msg += f"\n💬 **Most Negative Mention** (Score: {ex['score']:.2f}):\n"
+                examples_msg += f"*{ex['author']} in #{ex['channel']}:*\n\"{ex['content']}\""
+            
+            if examples_msg:
+                await ctx.send(examples_msg)
+        
+        print(f"console.log: fast_summarizer.py - Word search completed: {total} mentions found")
+        
+    except Exception as e:
+        error_msg = f"❌ Error during word search: {str(e)}"
+        await ctx.send(error_msg)
+        print(f"console.log: fast_summarizer.py - Word search error: {e}")
+
+@bot_client.command(name="help_search")
+async def help_search_command(ctx):
+    """Show help for word search commands"""
+    help_text = """
+**🔍 Word Search Commands:**
+
+`!wordsearch "term" [hours] [details]` - Search with sentiment analysis
+`!ws "term" [hours]` - Short version
+`!search "term" [hours]` - Alternative version
+
+**Parameters:**
+• `term` - Word/phrase to search (required, use quotes for phrases)
+• `hours` - Hours to look back (default: 7, max: 168)
+• `details` - Show examples? (yes/no, default: no)
+
+**Examples:**
+• `!wordsearch "bitcoin"` - Search "bitcoin" in last 7 hours
+• `!ws "DeFi protocol" 24` - Search phrase in last 24 hours  
+• `!search "rugpull" 12 yes` - Search with detailed examples
+
+**Features:**
+• 😊😔😐 Sentiment analysis (positive/negative/neutral)
+• 📊 Channel breakdown and user counts
+• 💬 Most positive/negative examples
+• 📈 Overall sentiment trends
+"""
+    await ctx.send(help_text)
+
 # --- Bot Event Handler ---
 
 @bot_client.event
@@ -602,7 +882,13 @@ async def on_ready():
         # summary_message, ending_art = await process_channels_and_summarize(config_type)  # Disabled auto-summary on startup
         print("console.log: fast_summarizer.py - Bot ready and listening for commands!")
         print("console.log: fast_summarizer.py - Use !summarize [hours] to generate summaries")
+        
+        # Start the daily summary task scheduled for 7:30 AM Arizona time
         if not daily_v3_summary.is_running():
+            arizona_tz = pytz.timezone('US/Arizona')
+            arizona_time = datetime.datetime.now(arizona_tz)
+            print(f"console.log: fast_summarizer.py - Starting daily summary task (next run: 7:30 AM Arizona time)")
+            print(f"console.log: fast_summarizer.py - Current Arizona time: {arizona_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             daily_v3_summary.start()        # Bot stays connected for commands - no auto-close
 
     except Exception as e:
