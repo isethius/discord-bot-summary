@@ -12,13 +12,8 @@ import os
 import tiktoken
 from dotenv import load_dotenv
 import discord
-from discord.ext import commands, tasks
 import asyncio
 import re
-import pytz
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from collections import defaultdict
-import math
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +25,7 @@ parser = argparse.ArgumentParser(description='Discord Fast Channel Summarizer')
 parser.add_argument('--hours', type=int, default=12, help='Number of hours of chat history to fetch (default: 12)')
 parser.add_argument('--limit', type=int, default=50, help='Maximum number of messages per channel (default: 50, currently informational)') # Note: Limit arg isn't strictly enforced in fetch logic anymore
 parser.add_argument('--debug', action='store_true', help='Print messages to console instead of summarizing')
-parser.add_argument('--config', type=str, default='ordinals', choices=['defi', 'ordinals'], help='Configuration type to use (defi or ordinals, default ordinals)')
+parser.add_argument('--config', type=str, default='defi', choices=['defi', 'ordinals'], help='Configuration type to use (defi or ordinals)')
 args = parser.parse_args()
 
 # Determine config type
@@ -42,12 +37,8 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')  # Discord bot token (primary method)
 # Load channel IDs based on config
 channel_ids_str = os.getenv(f'{config_type}_CHANNEL_IDS', '')
 CHANNEL_IDS = [int(id) for id in channel_ids_str.split(',') if id]
-
-# Load output channel ID based on config, handle missing/empty gracefully
-output_channel_id_str = os.getenv(f'{config_type}_OUTPUT_CHANNEL_ID', '') or '0'
-# Convert to int only if the string represents a valid integer
-OUTPUT_CHANNEL_ID = int(output_channel_id_str) if output_channel_id_str.isdigit() else 0
-# console.log(fast_summarizer.py: Loaded OUTPUT_CHANNEL_ID={OUTPUT_CHANNEL_ID})
+# Load output channel ID based on config
+OUTPUT_CHANNEL_ID = int(os.getenv(f'{config_type}_OUTPUT_CHANNEL_ID', '0'))
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 # Validate required config (common for both bot and fallback)
@@ -78,10 +69,9 @@ elif not TOKEN:
 # Functions requiring headers will create them locally.
 # Set up Discord bot client
 intents = discord.Intents.default()
-intents.message_content = True
 # Required for message content access if your bot needs it, but we fetch via HTTP API
 # intents.message_content = True # Uncomment if direct bot message reading is ever added
-bot_client = commands.Bot(command_prefix="!", intents=intents)
+bot_client = discord.Client(intents=intents)
 
 # --- Helper Functions ---
 
@@ -296,8 +286,8 @@ def send_user_message(channel_id, content):
     except Exception as e:
         print(f"Exception sending message via user token: {e}")
         return False
-
-async def generate_summary_openrouter(text, config_type_local, model_name="google/gemini-2.5-pro"):
+#async def generate_summary(text, config_type_local, model_name="deepseek/deepseek-r1-0528:free"):
+async def generate_summary(text, config_type_local, model_name="google/gemini-2.5-pro"):
     """Generate a summary using OpenRouter API asynchronously"""
     print(f"console.log: fast_summarizer.py - Generating summary using {model_name} for config '{config_type_local.lower()}'...")
     print(f"console.log: fast_summarizer.py - Text length to summarize: {len(text)} characters")
@@ -351,15 +341,6 @@ async def generate_summary_openrouter(text, config_type_local, model_name="googl
     except Exception as e:
         print(f"Error in OpenRouter API call: {e}")
         return f"Error generating summary: {e}"
-
-async def generate_summary(text, config_type_local, model_name="google/gemini-2.5-pro"):
-    """
-    Generate a summary using OpenRouter with the requested model slug.
-    """
-    print(f"console.log: fast_summarizer.py - Routing summary request for model: {model_name}")
-    if not OPENROUTER_API_KEY:
-        return "Error: OPENROUTER_API_KEY not set. Cannot use OpenRouter models."
-    return await generate_summary_openrouter(text, config_type_local, model_name)
 
 def split_message(message, max_length=2000):
     """Split a message into chunks of max_length."""
@@ -418,143 +399,6 @@ def split_message(message, max_length=2000):
         return final_parts
 
 
-def analyze_sentiment(text):
-    """
-    Analyze sentiment of text using VADER
-    Returns: dict with compound score and category
-    """
-    # console.log: fast_summarizer.py - Analyzing sentiment for message
-    analyzer = SentimentIntensityAnalyzer()
-    scores = analyzer.polarity_scores(text)
-    compound = scores['compound']
-    
-    if compound >= 0.05:
-        category = "positive"
-        emoji = "😊"
-    elif compound <= -0.05:
-        category = "negative" 
-        emoji = "😔"
-    else:
-        category = "neutral"
-        emoji = "😐"
-    
-    return {
-        'compound': compound,
-        'category': category,
-        'emoji': emoji,
-        'scores': scores
-    }
-
-async def search_word_with_sentiment(term, hours, channel_ids, user_token):
-    """
-    Search for a term in Discord messages with sentiment analysis
-    """
-    print(f"console.log: fast_summarizer.py - Starting word search for '{term}' in last {hours} hours")
-    
-    # Fetch messages using existing function
-    all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
-        channel_ids, hours, user_token
-    )
-    
-    if not all_messages_data:
-        print(f"console.log: fast_summarizer.py - No messages found for word search")
-        return None
-    
-    # Search for term (case-insensitive)
-    term_lower = term.lower()
-    matching_messages = []
-    sentiment_stats = {'positive': 0, 'negative': 0, 'neutral': 0}
-    user_mentions = set()
-    channel_breakdown = defaultdict(int)
-    sentiment_examples = {'most_positive': None, 'most_negative': None}
-    max_positive = -2
-    max_negative = 2
-    
-    print(f"console.log: fast_summarizer.py - Analyzing {len(all_messages_data)} messages for term '{term}'")
-    
-    for msg in all_messages_data:
-        content = msg.get('content', '')
-        if term_lower in content.lower():
-            # Analyze sentiment
-            sentiment_result = analyze_sentiment(content)
-            
-            # Track statistics
-            sentiment_stats[sentiment_result['category']] += 1
-            user_mentions.add(msg.get('author', 'Unknown'))
-            channel_breakdown[msg.get('channel', 'Unknown')] += 1
-            
-            # Track best examples
-            compound = sentiment_result['compound']
-            if compound > max_positive:
-                max_positive = compound
-                sentiment_examples['most_positive'] = {
-                    'content': content[:100] + '...' if len(content) > 100 else content,
-                    'score': compound,
-                    'author': msg.get('author', 'Unknown'),
-                    'channel': msg.get('channel', 'Unknown'),
-                    'timestamp': msg.get('timestamp', '')
-                }
-            
-            if compound < max_negative:
-                max_negative = compound
-                sentiment_examples['most_negative'] = {
-                    'content': content[:100] + '...' if len(content) > 100 else content,
-                    'score': compound,
-                    'author': msg.get('author', 'Unknown'),
-                    'channel': msg.get('channel', 'Unknown'),
-                    'timestamp': msg.get('timestamp', '')
-                }
-            
-            matching_messages.append({
-                'message': msg,
-                'sentiment': sentiment_result
-            })
-    
-    if not matching_messages:
-        print(f"console.log: fast_summarizer.py - No mentions of '{term}' found")
-        return {
-            'term': term,
-            'total_mentions': 0,
-            'sentiment_stats': sentiment_stats,
-            'unique_users': 0,
-            'channel_breakdown': dict(channel_breakdown),
-            'examples': sentiment_examples,
-            'overall_sentiment': 'neutral'
-        }
-    
-    # Calculate overall sentiment
-    total_mentions = len(matching_messages)
-    positive_pct = round((sentiment_stats['positive'] / total_mentions) * 100)
-    negative_pct = round((sentiment_stats['negative'] / total_mentions) * 100)
-    neutral_pct = round((sentiment_stats['neutral'] / total_mentions) * 100)
-    
-    # Determine overall sentiment trend
-    if positive_pct > 50:
-        overall_sentiment = f"Mostly Positive ({positive_pct}%)"
-    elif negative_pct > 50:
-        overall_sentiment = f"Mostly Negative ({negative_pct}%)"
-    elif positive_pct > negative_pct:
-        overall_sentiment = f"Positive-leaning ({positive_pct}% pos, {negative_pct}% neg)"
-    elif negative_pct > positive_pct:
-        overall_sentiment = f"Negative-leaning ({negative_pct}% neg, {positive_pct}% pos)"
-    else:
-        overall_sentiment = f"Neutral ({neutral_pct}% neutral)"
-    
-    print(f"console.log: fast_summarizer.py - Word search analysis complete: {total_mentions} mentions found")
-    
-    return {
-        'term': term,
-        'total_mentions': total_mentions,
-        'sentiment_stats': sentiment_stats,
-        'sentiment_percentages': {'positive': positive_pct, 'negative': negative_pct, 'neutral': neutral_pct},
-        'unique_users': len(user_mentions),
-        'channel_breakdown': dict(channel_breakdown),
-        'examples': sentiment_examples,
-        'overall_sentiment': overall_sentiment,
-        'messages': matching_messages
-    }
-
-
 async def process_channels_and_summarize(config_type_local):
     """
     Uses the unified fetch function, generates a summary, and prepares the message content.
@@ -598,7 +442,7 @@ async def process_channels_and_summarize(config_type_local):
     header = f"**Aggregated Summary ({config_type_local.lower().capitalize()}) of {len(channel_names)} Channels ({total_messages_found} msgs):**\n{channel_list}\n\n"
 
     # Ending ASCII art
-    ending_ascii_art = """* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊"""
+    ending_ascii_art = """* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊ ¸* . ﹢ ˖ ✦ ¸ . ﹢ ° ¸. ° ˖ ･ ·̩ ｡ ☆ ﾟ ＊"""
     
     # Keep main message without ASCII art
     full_message = header + formatted_summary
@@ -608,441 +452,6 @@ async def process_channels_and_summarize(config_type_local):
 
     print("--- Channel Processing Complete ---")
     return full_message, ending_art_code_block
-
-# --- Bot Commands ---
-
-V3_MODEL_SLUG = "google/gemini-2.5-pro"
-V3_OUTPUT_CHANNEL_ID = int(os.getenv("V3_OUTPUT_CHANNEL_ID", "0"))
-
-@tasks.loop(time=datetime.time(hour=14, minute=30))  # 7:30 AM Arizona time (UTC-7, so 14:30 UTC)
-async def daily_v3_summary():
-    """Post a Gemini 2.5 Pro summary every day at 7:30 AM Arizona time to its dedicated channel"""
-    if V3_OUTPUT_CHANNEL_ID == 0:
-        print("console.log: fast_summarizer.py - V3_OUTPUT_CHANNEL_ID not set; skipping daily summary loop")
-        return
-    
-    # Verify we're running at the correct Arizona time
-    arizona_tz = pytz.timezone('US/Arizona')
-    arizona_time = datetime.datetime.now(arizona_tz)
-    print(f"console.log: fast_summarizer.py - Running daily Gemini Pro summary at Arizona time: {arizona_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    
-    hours = 24
-    try:
-        msgs, names, total = await fetch_and_process_channel_data(CHANNEL_IDS, hours, TOKEN)
-        if not msgs:
-            print("console.log: fast_summarizer.py - No messages for daily Gemini Pro summary")
-            return
-        text = "".join(f"[{m['channel']}] {m['author']}: {m['content']}\n" for m in msgs if m.get('content'))
-        summary = await generate_summary(text, config_type, model_name=V3_MODEL_SLUG)
-        header = f"**Daily Gemini 2.5 Pro Summary ({total} msgs / 24 h) - {arizona_time.strftime('%B %d, %Y')}**\n"
-        for part in split_message(header + summary.strip()):
-            await send_bot_message(V3_OUTPUT_CHANNEL_ID, part)
-            await asyncio.sleep(1)
-        print("console.log: fast_summarizer.py - Daily Gemini Pro summary posted successfully")
-    except Exception as e:
-        print(f"console.log: fast_summarizer.py - Error in daily Gemini Pro summary: {e}")
-
-# Mapping for dynamic model selection
-MODEL_MAP = {
-    "pro": "google/gemini-2.5-pro",           # premium (default)
-    "grok": "x-ai/grok-2",                    # Grok 2 via OpenRouter
-    "grok-mini": "x-ai/grok-2-mini",          # Grok 2 Mini via OpenRouter
-    "sonnet": "anthropic/claude-3.5-sonnet",  # Claude 3.5 Sonnet (quality)
-    "haiku": "anthropic/claude-3.5-haiku",    # Claude 3.5 Haiku (cost-effective)
-    "v3":  "deepseek/deepseek-chat-v3-0324",  # budget
-    "free": "deepseek/deepseek-r1-distill-llama-70b:free"  # zero-cost
-}
-
-@bot_client.command(name="summarize", aliases=["sum", "summary"])
-async def summarize_command(ctx, tier_or_hours: str = "pro", hours: int = 12):
-    """Summarize the last X hours of messages. Usage: !summarize 6 or !sum 12"""
-    print(f"console.log: fast_summarizer.py - Command received: summarize {tier_or_hours} {hours} from {ctx.author}")
-    
-    # Determine model tier and hours
-    selected_model_key = "pro"
-    if tier_or_hours.isdigit():
-        hours = int(tier_or_hours)
-    else:
-        selected_model_key = tier_or_hours.lower()
-
-    # Validate hours
-    if hours < 1 or hours > 72:
-        await ctx.send("❌ Hours must be between 1 and 72!")
-        return
-    
-    # Ensure DISCORD_TOKEN is configured for HTTP fetch path
-    if not TOKEN:
-        await ctx.send("❌ DISCORD_TOKEN is not configured. Please add DISCORD_TOKEN to your .env so I can fetch messages via the HTTP path.")
-        print("console.log: fast_summarizer.py - DISCORD_TOKEN missing; cannot fetch messages via HTTP API")
-        return
-    
-    # Resolve model: support aliases in MODEL_MAP or raw OpenRouter slugs
-    if selected_model_key in MODEL_MAP:
-        model_slug = MODEL_MAP[selected_model_key]
-        model_label = selected_model_key
-    else:
-        # Accept raw slugs like anthropic/claude-3.5-haiku
-        if "/" in selected_model_key:
-            model_slug = selected_model_key
-            model_label = selected_model_key
-        else:
-            valid_keys = ", ".join(MODEL_MAP.keys())
-            await ctx.send(f"❌ Unknown model tier '{selected_model_key}'. Valid options: {valid_keys} or provide a raw model slug (e.g., anthropic/claude-3.5-haiku)")
-            return
-
-    # Send initial response
-    await ctx.send(f"🔄 Generating summary for the last {hours} hours using **{model_label}**…")
-    
-    try:
-        # Use the existing summarization logic
-        all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
-            CHANNEL_IDS, hours, TOKEN
-        )
-        
-        if not all_messages_data:
-            await ctx.send("❌ No messages found in the specified time period.")
-            return
-        
-        # Generate conversation text
-        conversation_text = ""
-        for msg in all_messages_data:
-            if msg.get("content"):
-                conversation_text += f"[{msg['channel']}] {msg['author']}: {msg['content']}\n"
-        
-        if not conversation_text.strip():
-            await ctx.send("❌ No message content found to summarize.")
-            return
-        
-        # Generate summary
-        summary = await generate_summary(conversation_text, config_type, model_name=model_slug)
-        formatted_summary = summary.strip()
-        
-        # Create header
-        channel_list = ", ".join(channel_names.values())
-        header = (
-            f"**Requested Summary ({config_type.lower().capitalize()}) of {len(channel_names)} Channels "
-            f"({total_messages_found} msgs, {hours}h, model: {model_label}):**\n{channel_list}\n\n"
-        )
-        
-        full_message = header + formatted_summary
-        
-        # Send summary in parts
-        message_parts = split_message(full_message)
-        for part in message_parts:
-            await ctx.send(part)
-            await asyncio.sleep(1)
-        
-        print(f"console.log: fast_summarizer.py - Command completed successfully for {ctx.author}")
-        
-    except Exception as e:
-        error_msg = f"❌ Error generating summary: {str(e)}"
-        await ctx.send(error_msg)
-        print(f"console.log: fast_summarizer.py - Command error: {e}")
-
-@bot_client.command(name="compare", aliases=["comp", "comparison"])
-async def compare_models_command(ctx, hours: int = 12):
-    """Compare Grok vs Gemini Pro 2.5 summaries side by side. Usage: !compare [hours]"""
-    print(f"console.log: fast_summarizer.py - Model comparison command: {hours}h from {ctx.author}")
-    
-    # Validate hours
-    if hours < 1 or hours > 72:
-        await ctx.send("❌ Hours must be between 1 and 72!")
-        return
-    
-    if not OPENROUTER_API_KEY:
-        await ctx.send("❌ OPENROUTER_API_KEY not configured. Cannot compare without model access.")
-        return
-
-    # Ensure DISCORD_TOKEN is configured for HTTP fetch path
-    if not TOKEN:
-        await ctx.send("❌ DISCORD_TOKEN is not configured. Please add DISCORD_TOKEN to your .env so I can fetch messages.")
-        print("console.log: fast_summarizer.py - DISCORD_TOKEN missing; cannot fetch messages via HTTP API")
-        return
-    
-    # Send initial response
-    await ctx.send(f"🔄 Generating comparison between **Grok** and **Gemini Pro 2.5** for the last {hours} hours...")
-    
-    try:
-        # Fetch messages once for both models
-        all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
-            CHANNEL_IDS, hours, TOKEN
-        )
-        
-        if not all_messages_data:
-            await ctx.send("❌ No messages found in the specified time period.")
-            return
-        
-        # Generate conversation text
-        conversation_text = ""
-        for msg in all_messages_data:
-            if msg.get("content"):
-                conversation_text += f"[{msg['channel']}] {msg['author']}: {msg['content']}\n"
-        
-        if not conversation_text.strip():
-            await ctx.send("❌ No message content found to summarize.")
-            return
-        
-        # Generate summaries with both models concurrently
-        print(f"console.log: fast_summarizer.py - Generating concurrent summaries with Grok and Gemini Pro")
-        grok_task = asyncio.create_task(generate_summary(conversation_text, config_type, model_name="grok-beta"))
-        gemini_task = asyncio.create_task(generate_summary(conversation_text, config_type, model_name="google/gemini-2.5-pro"))
-        
-        # Wait for both summaries to complete
-        grok_summary, gemini_summary = await asyncio.gather(grok_task, gemini_task)
-        
-        # Create comparison header
-        channel_list = ", ".join(channel_names.values())
-        header = (
-            f"**🆚 Model Comparison ({config_type.lower().capitalize()}) - {total_messages_found} msgs, {hours}h**\n"
-            f"Channels: {channel_list}\n\n"
-        )
-        
-        # Format Grok summary
-        grok_section = f"**🤖 Grok Summary:**\n{grok_summary.strip()}\n\n"
-        
-        # Format Gemini summary  
-        gemini_section = f"**🧠 Gemini Pro 2.5 Summary:**\n{gemini_summary.strip()}\n\n"
-        
-        # Combine all parts
-        full_comparison = header + grok_section + gemini_section
-        
-        # Add comparison footer
-        footer = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Compare the summaries above to see which model better captures the key insights!**"
-        full_message = full_comparison + footer
-        
-        # Send comparison in parts if needed
-        message_parts = split_message(full_message)
-        for part in message_parts:
-            await ctx.send(part)
-            await asyncio.sleep(1)
-        
-        print(f"console.log: fast_summarizer.py - Model comparison completed successfully for {ctx.author}")
-        
-    except Exception as e:
-        error_msg = f"❌ Error generating comparison: {str(e)}"
-        await ctx.send(error_msg)
-        print(f"console.log: fast_summarizer.py - Comparison error: {e}")
-
-@bot_client.command(name="compare_grok", aliases=["cgrok", "comparegrok"])
-async def compare_grok_command(ctx, variant_a: str = "x-ai/grok-2", variant_b: str = "x-ai/grok-2-mini", hours: int = 12):
-    """Compare two Grok variants via OpenRouter. Usage: !compare_grok [modelA] [modelB] [hours]"""
-    print(f"console.log: fast_summarizer.py - Grok comparison command: {variant_a} vs {variant_b}, {hours}h from {ctx.author}")
-    
-    # Validate hours
-    if hours < 1 or hours > 72:
-        await ctx.send("❌ Hours must be between 1 and 72!")
-        return
-    
-    if not OPENROUTER_API_KEY:
-        await ctx.send("❌ OPENROUTER_API_KEY not configured.")
-        return
-
-    # Ensure DISCORD_TOKEN is configured for HTTP fetch path
-    if not TOKEN:
-        await ctx.send("❌ DISCORD_TOKEN is not configured. Please add DISCORD_TOKEN to your .env so I can fetch messages.")
-        print("console.log: fast_summarizer.py - DISCORD_TOKEN missing; cannot fetch messages via HTTP API")
-        return
-    
-    await ctx.send(f"🔄 Comparing **{variant_a}** vs **{variant_b}** for the last {hours} hours...")
-    try:
-        all_messages_data, channel_names, total_messages_found = await fetch_and_process_channel_data(
-            CHANNEL_IDS, hours, TOKEN
-        )
-        if not all_messages_data:
-            await ctx.send("❌ No messages found in the specified time period.")
-            return
-        conversation_text = ""
-        for msg in all_messages_data:
-            if msg.get("content"):
-                conversation_text += f"[{msg['channel']}] {msg['author']}: {msg['content']}\n"
-        if not conversation_text.strip():
-            await ctx.send("❌ No message content found to summarize.")
-            return
-        print("console.log: fast_summarizer.py - Generating concurrent summaries for Grok variants")
-        a_task = asyncio.create_task(generate_summary(conversation_text, config_type, model_name=variant_a))
-        b_task = asyncio.create_task(generate_summary(conversation_text, config_type, model_name=variant_b))
-        a_summary, b_summary = await asyncio.gather(a_task, b_task)
-        channel_list = ", ".join(channel_names.values())
-        header = (
-            f"**🆚 Grok Variant Comparison ({config_type.lower().capitalize()}) - {total_messages_found} msgs, {hours}h**\n"
-            f"Channels: {channel_list}\n\n"
-        )
-        a_section = f"**A: {variant_a}**\n{a_summary.strip()}\n\n"
-        b_section = f"**B: {variant_b}**\n{b_summary.strip()}\n\n"
-        footer = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💡 **Pick the variant that reads best for your use case.**"
-        full_message = header + a_section + b_section + footer
-        for part in split_message(full_message):
-            await ctx.send(part)
-            await asyncio.sleep(1)
-        print(f"console.log: fast_summarizer.py - Grok comparison completed successfully for {ctx.author}")
-    except Exception as e:
-        await ctx.send(f"❌ Error generating Grok comparison: {str(e)}")
-        print(f"console.log: fast_summarizer.py - Grok comparison error: {e}")
-
-@bot_client.command(name="help_summary")
-async def help_summary(ctx):
-    """Show help for summary commands"""
-    help_text = """
-**📋 Summary Commands:**
-
-`!summarize [hours]` - Generate summary for last X hours (default: 12)
-`!sum [hours]` - Short version of summarize
-`!summary [hours]` - Alternative version
-
-**Examples:**
-• `!summarize` - Last 12 hours
-• `!sum 6` - Last 6 hours
-• `!summary 24` - Last 24 hours
-
-**Model Options:**
-• `pro` - Gemini 2.5 Pro (best quality, default)
-• `grok` - xAI Grok (witty and insightful)
-• `v3` - DeepSeek V3 (budget option)
-• `free` - DeepSeek R1 Distill (zero cost)
-
-**Notes:**
-• Hours range: 1-72
-• Uses current configuration (ordinals)
-"""
-    await ctx.send(help_text)
-
-@bot_client.command(name="helpbot")
-async def help_command(ctx):
-    """Show help for all bot commands"""
-    help_text = """
-**🤖 Discord Bot Commands:**
-
-**📋 Summary Commands:**
-`!summarize [model] [hours]` - Generate summary (default: pro, 12h)
-`!sum [hours]` - Quick summary
-`!summary [hours]` - Alternative
-
-**🔍 Search Commands:**
-`!wordsearch "term" [hours] [details]` - Word search with sentiment
-`!ws "term"` - Quick word search  
-`!search "term"` - Alternative search
-
-**🆚 Comparison Commands:**
-`!compare [hours]` - Compare Grok vs Gemini Pro 2.5
-`!comp [hours]` - Quick comparison
-`!comparison [hours]` - Alternative comparison
-
-**ℹ️ Help Commands:**
-`!helpbot` - Show this help
-`!help_summary` - Detailed summary help
-`!help_search` - Detailed search help
-
-**Models:** pro (Gemini 2.5), grok (Grok-2), grok-mini (Grok-2-mini), sonnet (Claude 3.5 Sonnet), haiku (Claude 3.5 Haiku), v3 (DeepSeek), free (budget). You can also pass a raw model slug like `anthropic/claude-3.5-haiku`.
-"""
-    await ctx.send(help_text)
-
-@bot_client.command(name="wordsearch", aliases=["ws", "search"])
-async def word_search_command(ctx, term: str, hours: int = 7, show_details: str = "no"):
-    """Search for a word/phrase with sentiment analysis. Usage: !wordsearch "term" [hours] [details]"""
-    print(f"console.log: fast_summarizer.py - Word search command: '{term}' {hours}h from {ctx.author}")
-    
-    # Validate inputs
-    if hours < 1 or hours > 168:  # Max 1 week
-        await ctx.send("❌ Hours must be between 1 and 168 (1 week)!")
-        return
-    
-    if len(term) < 2:
-        await ctx.send("❌ Search term must be at least 2 characters!")
-        return
-
-    # Ensure DISCORD_TOKEN is configured for HTTP fetch path
-    if not TOKEN:
-        await ctx.send("❌ DISCORD_TOKEN is not configured. Please add DISCORD_TOKEN to your .env so I can fetch messages.")
-        print("console.log: fast_summarizer.py - DISCORD_TOKEN missing; cannot fetch messages via HTTP API")
-        return
-    
-    # Send initial response
-    await ctx.send(f"🔍 Searching for **'{term}'** in the last {hours} hours with sentiment analysis...")
-    
-    try:
-        # Perform search
-        results = await search_word_with_sentiment(term, hours, CHANNEL_IDS, TOKEN)
-        
-        if not results or results['total_mentions'] == 0:
-            await ctx.send(f"❌ No mentions of **'{term}'** found in the last {hours} hours.")
-            return
-        
-        # Format results
-        stats = results['sentiment_stats']
-        total = results['total_mentions']
-        unique_users = results['unique_users']
-        overall = results['overall_sentiment']
-        
-        # Create main response
-        response = f"""📊 **Search Results for "{term}" (Last {hours} hours)**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📝 **Total Mentions:** {total}
-😊 **Positive:** {stats['positive']} ({results['sentiment_percentages']['positive']}%)
-😔 **Negative:** {stats['negative']} ({results['sentiment_percentages']['negative']}%)
-😐 **Neutral:** {stats['neutral']} ({results['sentiment_percentages']['neutral']}%)
-
-👥 **Unique Users:** {unique_users}
-📈 **Overall Sentiment:** {overall}
-
-📊 **Channel Breakdown:**"""
-        
-        # Add channel breakdown
-        for channel, count in results['channel_breakdown'].items():
-            response += f"\n• **{channel}:** {count} mentions"
-        
-        await ctx.send(response)
-        
-        # Show examples if requested or if there are notable sentiment examples
-        if show_details.lower() in ['yes', 'y', 'true', '1'] or total <= 10:
-            examples_msg = ""
-            
-            if results['examples']['most_positive'] and stats['positive'] > 0:
-                ex = results['examples']['most_positive']
-                examples_msg += f"\n💬 **Most Positive Mention** (Score: {ex['score']:.2f}):\n"
-                examples_msg += f"*{ex['author']} in #{ex['channel']}:*\n\"{ex['content']}\"\n"
-            
-            if results['examples']['most_negative'] and stats['negative'] > 0:
-                ex = results['examples']['most_negative']
-                examples_msg += f"\n💬 **Most Negative Mention** (Score: {ex['score']:.2f}):\n"
-                examples_msg += f"*{ex['author']} in #{ex['channel']}:*\n\"{ex['content']}\""
-            
-            if examples_msg:
-                await ctx.send(examples_msg)
-        
-        print(f"console.log: fast_summarizer.py - Word search completed: {total} mentions found")
-        
-    except Exception as e:
-        error_msg = f"❌ Error during word search: {str(e)}"
-        await ctx.send(error_msg)
-        print(f"console.log: fast_summarizer.py - Word search error: {e}")
-
-@bot_client.command(name="help_search")
-async def help_search_command(ctx):
-    """Show help for word search commands"""
-    help_text = """
-**🔍 Word Search Commands:**
-
-`!wordsearch "term" [hours] [details]` - Search with sentiment analysis
-`!ws "term" [hours]` - Short version
-`!search "term" [hours]` - Alternative version
-
-**Parameters:**
-• `term` - Word/phrase to search (required, use quotes for phrases)
-• `hours` - Hours to look back (default: 7, max: 168)
-• `details` - Show examples? (yes/no, default: no)
-
-**Examples:**
-• `!wordsearch "bitcoin"` - Search "bitcoin" in last 7 hours
-• `!ws "DeFi protocol" 24` - Search phrase in last 24 hours  
-• `!search "rugpull" 12 yes` - Search with detailed examples
-
-**Features:**
-• 😊😔😐 Sentiment analysis (positive/negative/neutral)
-• 📊 Channel breakdown and user counts
-• 💬 Most positive/negative examples
-• 📈 Overall sentiment trends
-"""
-    await ctx.send(help_text)
 
 # --- Bot Event Handler ---
 
@@ -1055,20 +464,51 @@ async def on_ready():
 
     summary_message = ending_art = None
     try:
-        # summary_message, ending_art = await process_channels_and_summarize(config_type)  # Disabled auto-summary on startup
-        print("console.log: fast_summarizer.py - Bot ready and listening for commands!")
-        print("console.log: fast_summarizer.py - Use !summarize [hours] to generate summaries")
-        
-        # Start the daily summary task scheduled for 7:30 AM Arizona time
-        if not daily_v3_summary.is_running():
-            arizona_tz = pytz.timezone('US/Arizona')
-            arizona_time = datetime.datetime.now(arizona_tz)
-            print(f"console.log: fast_summarizer.py - Starting daily summary task (next run: 7:30 AM Arizona time)")
-            print(f"console.log: fast_summarizer.py - Current Arizona time: {arizona_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            daily_v3_summary.start()        # Bot stays connected for commands - no auto-close
-
+        summary_message, ending_art = await process_channels_and_summarize(config_type)
     except Exception as e:
-        print(f"Error during bot startup: {e}")# --- Fallback Logic ---
+        print(f"Error during channel processing and summarization: {e}")
+        # Optionally try to send an error message via bot
+        try:
+            await send_bot_message(OUTPUT_CHANNEL_ID, f"An error occurred during summarization: {e}")
+        except Exception as send_e:
+             print(f"Failed to send error message via bot: {send_e}")
+
+    if summary_message:
+        print(f"Sending summary to Discord channel {OUTPUT_CHANNEL_ID} using bot...")
+        # Send main message parts first
+        message_parts = split_message(summary_message)
+        success_count = 0
+        for i, part in enumerate(message_parts):
+            success = await send_bot_message(OUTPUT_CHANNEL_ID, part)
+            if success:
+                success_count += 1
+            await asyncio.sleep(1) # Delay between parts
+
+        # Send ASCII art in separate message if it exists
+        if ending_art:
+            await send_bot_message(OUTPUT_CHANNEL_ID, ending_art)
+            if success:
+                success_count += 1
+            else:
+                print(f"Failed to send part {i+1} of the summary via bot.")
+                # No automatic fallback here anymore, main() handles initial failure
+            await asyncio.sleep(1) # Delay between parts
+
+        if success_count == len(message_parts):
+             print("Summary sent successfully via bot.")
+        else:
+             print(f"Failed to send {len(message_parts) - success_count} parts of the summary via bot.")
+
+    else:
+        print("No summary was generated or an error occurred.")
+
+    # Close the bot connection gracefully
+    print("Processing complete. Closing bot connection...")
+    await bot_client.close()
+    print("Bot connection closed.")
+
+
+# --- Fallback Logic ---
 
 def run_fallback_synchronously(config_type_fallback):
     """

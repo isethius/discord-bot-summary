@@ -40,6 +40,30 @@
 !search "alpha" 6             → Search "alpha" in last 6 hours
 ```
 
+## 🆚 MODEL COMPARISON COMMANDS ✨ NEW!
+
+### Basic Comparison Commands
+- `!compare [hours]` - Compare Grok vs Gemini Pro 2.5 summaries side by side
+- `!comp [hours]` - Quick comparison shortcut command
+- `!comparison [hours]` - Alternative comparison command
+- `!compare_grok [modelA] [modelB] [hours]` - Compare two Grok variants (default: `x-ai/grok-2` vs `x-ai/grok-2-mini`)
+
+### Comparison Examples
+```
+!compare                      → Compare models for last 12 hours
+!comp 6                       → Quick 6-hour comparison
+!comparison 24                → Compare models for last 24 hours
+!compare_grok                 → Compare x-ai/grok-2 vs x-ai/grok-2-mini (12h)
+!compare_grok x-ai/grok-2 x-ai/grok-2-mini 24 → 24h variants
+```
+
+### Comparison Features
+- 🤖 **Grok Summary** - xAI's witty and insightful analysis
+- 🧠 **Gemini Pro 2.5 Summary** - Google's advanced reasoning
+- ⚡ **Concurrent Generation** - Both summaries generated simultaneously
+- 📊 **Side-by-Side Format** - Easy comparison of different approaches
+- 💡 **Quality Assessment** - Compare which model captures key insights better
+
 ## ℹ️ HELP COMMANDS
 
 - `!helpbot` - Show all available commands overview
@@ -50,12 +74,16 @@
 
 ### Available Models
 - **`pro`** 🔥 - Gemini 2.5 Pro (best quality, default)
+- **`grok`** 🤖 - xAI Grok 2 via OpenRouter (`x-ai/grok-2`)
+- **`grok-mini`** ⚡ - xAI Grok 2 Mini via OpenRouter (`x-ai/grok-2-mini`)
 - **`v3`** 💰 - DeepSeek V3 (budget option)
 - **`free`** 🆓 - DeepSeek R1 Distill (zero cost)
 
 ### Model Usage Examples
 ```
 !summarize pro 12             → Premium model, 12 hours
+!summarize grok 6             → Grok 2 model, 6 hours
+!summarize grok-mini 6        → Grok 2 Mini model, 6 hours
 !summarize v3 24              → Budget model, 24 hours
 !summarize free 6             → Free model, 6 hours
 ```
@@ -104,6 +132,8 @@
 ### Most Common Commands
 ```
 !summarize                    → Quick daily summary
+!compare 12                   → Compare Grok vs Gemini Pro
+!compare_grok                 → Compare Grok variants quickly
 !ws "bitcoin"                 → Bitcoin sentiment check
 !search "alpha" 24 yes        → Alpha mentions with examples
 !sum 6                        → Quick 6-hour summary
@@ -113,6 +143,9 @@
 ### Advanced Usage
 ```
 !wordsearch "pump and dump" 48 yes    → Multi-word phrase search
+!summarize grok 24                     → Grok model 24-hour summary
+!compare 48                            → Extended model comparison
+!compare_grok x-ai/grok-2 x-ai/grok-2-mini 48 → Extended Grok comparison
 !summarize v3 72                       → Long-term budget summary
 !ws "moon" 168                         → Week-long sentiment tracking
 ```
@@ -120,10 +153,11 @@
 ## 🚀 BOT STATUS
 
 - ✅ **Status**: Online and ready
-- 🔄 **Last Updated**: Added sentiment-powered word search
+- 🔄 **Last Updated**: Added Grok integration & model comparison
 - 🤖 **Bot Name**: SS#6709
 - 📡 **Channels Monitored**: 4 channels
 - 🕐 **Daily Summary**: 7:30 AM Arizona Time
+- 🆚 **New Feature**: Compare Grok vs Gemini Pro 2.5 summaries
 
 ---
 
